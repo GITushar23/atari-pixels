@@ -2,7 +2,7 @@ import os
 import numpy as np
 import torch
 from tqdm import trange
-from atari_env import AtariBreakoutEnv
+from atari_env import AtariBreakoutEnv , SuperMarioBrosEnv
 from dqn_agent import DQNAgent, ReplayBuffer
 import cv2
 import json
@@ -15,9 +15,26 @@ import wandb
 from collections import deque
 
 # Config
+# config = {
+#     'env_name': 'Breakout',
+#     'n_actions': 4,
+#     'state_shape': (8, 84, 84),
+#     'max_episodes': 10000,
+#     'max_steps': 1000,
+#     'target_update_freq': 10000, #since i'm doing 5 update steps per environment step, this means 200*5=1000 steps between target network updates
+#     'checkpoint_dir': 'checkpoints',
+#     'data_dir': 'data/raw_gameplay',
+#     'actions_dir': 'data/actions',
+#     'save_freq': 10,
+#     'min_buffer': 100000,
+#     'seed': 42,
+#     'epsilon': 0.1,  # Epsilon for epsilon-greedy exploration
+# }
+
+"""NEW METHOD"""
 config = {
-    'env_name': 'Breakout',
-    'n_actions': 4,
+    'env_name': 'SuperMarioBros',
+    'n_actions': 7,
     'state_shape': (8, 84, 84),
     'max_episodes': 10000,
     'max_steps': 1000,
@@ -172,7 +189,9 @@ def main():
 
     # Fill replay buffer with random actions first
     print("Pre-filling replay buffer with random experiences...")
-    env = AtariBreakoutEnv()
+    """NEW METHOD"""
+    # env = AtariBreakoutEnv()
+    env = SuperMarioBrosEnv(new_width=config['state_shape'][2], new_height=config['state_shape'][1])
     obs, info = env.reset()
     state_stack = np.stack([obs] * 8, axis=0)
     replay_buffer = agent.replay_buffer if exploration_mode == 'epsilon' else shared_replay_buffer
@@ -194,7 +213,9 @@ def main():
         if step % 1000 == 0:
             print(f"  {step}/{max(5000, config['min_buffer'])} experiences collected")
 
-    eval_env = AtariBreakoutEnv()
+    """NEW METHOD"""
+    # eval_env = AtariBreakoutEnv()
+    eval_env = SuperMarioBrosEnv(new_width=config['state_shape'][2], new_height=config['state_shape'][1])
 
     window_size_for_logs = 30
     running_losses = deque(maxlen=window_size_for_logs)

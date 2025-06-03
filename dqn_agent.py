@@ -274,7 +274,7 @@ class DQNAgent:
             else:
                 self.replay_buffer = ReplayBuffer(capacity=1000000)
         self.gamma = 0.99  # Discount factor
-        self.batch_size = 32
+        self.batch_size = 128
         self.learning_rate = 2.5e-4
         # Device selection
         if torch.cuda.is_available():
@@ -402,7 +402,8 @@ class DQNAgent:
         Too frequent updates can lead to unstable training,
         while too infrequent updates can lead to stale targets.
         """
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+        policy_state_dict = getattr(self.policy_net, '_orig_mod', self.policy_net).state_dict()
+        self.target_net.load_state_dict(policy_state_dict)
 
     def anneal_per_beta(self, new_beta):
         if self.prioritized and hasattr(self.replay_buffer, 'anneal_beta'):

@@ -43,7 +43,8 @@ class AtariFramePairDataset(Dataset):
             self.episode_dirs = self.episode_dirs[n_train+n_val:]
         else:
             raise ValueError(f"Unknown split: {split}")
-        self.pairs = self._collect_pairs()
+        # self.pairs = self._collect_pairs()
+        self.triplets = self._collect_triplets()
 
     def _collect_pairs(self) -> List[Tuple[str, str]]:
         pairs = []
@@ -53,8 +54,22 @@ class AtariFramePairDataset(Dataset):
                 pairs.append((frame_files[i], frame_files[i+1]))
         return pairs
 
+    def _collect_triplets(self) -> List[Tuple[str, str, str]]: # New method
+        """NEW METHOD"""
+
+        triplets = []
+        for ep_dir in self.episode_dirs:
+            frame_files = sorted(glob.glob(os.path.join(ep_dir, '*.png')), key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
+            # Need at least 3 frames to form a triplet (t-1, t, t+1)
+            if len(frame_files) >= 3:
+                for i in range(len(frame_files) - 2): # Iterate up to the third-to-last frame
+                    triplets.append((frame_files[i], frame_files[i+1], frame_files[i+2]))
+        return triplets
+
     def __len__(self):
-        return len(self.pairs)
+        # return len(self.pairs)
+        """NEW METHOD"""
+        return len(self.triplets)
 
     def _load_frame(self, path: str) -> np.ndarray:
         img = Image.open(path)
@@ -70,10 +85,16 @@ class AtariFramePairDataset(Dataset):
         return arr
 
     def __getitem__(self, idx):
-        frame_t_path, frame_tp1_path = self.pairs[idx]
+        # frame_t_path, frame_tp1_path = self.pairs[idx]
+        # frame_t = self._load_frame(frame_t_path)
+        # frame_tp1 = self._load_frame(frame_tp1_path)
+        # return torch.from_numpy(frame_t), torch.from_numpy(frame_tp1)
+        """NEW METHOD"""
+        frame_tm1_path, frame_t_path, frame_tp1_path = self.triplets[idx] # New
+        frame_tm1 = self._load_frame(frame_tm1_path)
         frame_t = self._load_frame(frame_t_path)
         frame_tp1 = self._load_frame(frame_tp1_path)
-        return torch.from_numpy(frame_t), torch.from_numpy(frame_tp1)
+        return torch.from_numpy(frame_tm1), torch.from_numpy(frame_t), torch.from_numpy(frame_tp1) # New
 
 class ActionLatentPairDataset(Dataset):
     def __init__(self, json_path):

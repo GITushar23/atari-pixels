@@ -372,24 +372,102 @@ def train(args):
     optimizer.zero_grad()
     data_iter = iter(train_loader)
     pbar = tqdm(range(args.max_iters), desc="Training", dynamic_ncols=True)
+    """NEW METHOD"""
     while global_step < args.max_iters:
         try:
-            frame_t, frame_tp1 = next(data_iter)
+            # frame_t, frame_tp1 = next(data_iter)
+            frame_tm1,frame_t, frame_tp1 = next(data_iter)
         except StopIteration:
             data_iter = iter(train_loader)
-            frame_t, frame_tp1 = next(data_iter)
-        frame_t, frame_tp1 = frame_t.to(device), frame_tp1.to(device)
+            # frame_t, frame_tp1 = next(data_iter)
+            frame_tm1,frame_t, frame_tp1 = next(data_iter)
+        # frame_t, frame_tp1 = frame_t.to(device), frame_tp1.to(device)
+        frame_tm1, frame_t, frame_tp1 = frame_tm1.to(device), frame_t.to(device), frame_tp1.to(device)
+
+
+        # Calculate current probability for recursive conditioning
+        curr_p = min(args.recursive_conditioning_prob_max,
+                     args.recursive_conditioning_prob_max * (global_step / float(args.recursive_conditioning_anneal_iters)))
+        wandb.log({'hyperparam/p_recursive': curr_p}, step=global_step + 1)
+
+        with torch.no_grad():
+
+            f_tm1_perm = frame_tm1.permute(0, 1, 3, 2)
+            f_t_perm_for_regen = frame_t.permute(0, 1, 3, 2)
+
+            x_recon_t = torch.cat([f_tm1_perm, f_t_perm_for_regen], dim=1)
+            if isinstance(model, torch.nn.DataParallel):
+                z_recon_t = model.module.encoder(x_recon_t)
+                quantized_recon_t, _, _, _ = model.module.vq(z_recon_t)
+                regenerated_f_t_candidate_perm = model.module.decoder(quantized_recon_t, f_tm1_perm)
+            else:
+                z_recon_t = model.encoder(x_recon_t)
+                quantized_recon_t, _, _, _ = model.vq(z_recon_t)
+                regenerated_f_t_candidate_perm = model.decoder(quantized_recon_t, f_tm1_perm)
+        
+        
+        # with torch.amp.autocast(device.type, enabled=(scaler is not None)):
+        #     recon, indices, commit_loss, codebook_loss = model(frame_t, frame_tp1)
+        #     #rec_loss = F.mse_loss(recon, frame_tp1)
+        #     frame_diff = torch.abs(frame_tp1 - frame_t)
+        #     motion_weight = 1.0 + 10.0 * (frame_diff.sum(dim=1, keepdim=True) > 0.05).float()
+        #     rec_loss = (motion_weight * (recon - frame_tp1)**2).mean()
+
+        #     # Entropy regularization
+        #     entropy, hist = codebook_entropy(indices, 256)
+        #     entropy_reg = -args.entropy_weight * entropy
+        #     loss = rec_loss + commit_loss + codebook_loss + entropy_reg
+        # recon_tp1 = recon
+
+        """NEW METHOD"""
         with torch.amp.autocast(device.type, enabled=(scaler is not None)):
-            recon, indices, commit_loss, codebook_loss = model(frame_t, frame_tp1)
-            #rec_loss = F.mse_loss(recon, frame_tp1)
+            # Permute (ground‐truth) frame_t and frame_tp1 for encoding
+            f_t_main_perm   = frame_t.permute(0, 1, 3, 2)    # (B, C, W, H)
+            f_tp1_main_perm = frame_tp1.permute(0, 1, 3, 2)
+
+            # Encode & VQ on (frame_t, frame_tp1)
+            x_for_pred = torch.cat([f_t_main_perm, f_tp1_main_perm], dim=1)
+            if isinstance(model, torch.nn.DataParallel):
+                z_for_pred, = (model.module.encoder(x_for_pred),)
+                quantized_pred, indices, commit_loss, codebook_loss = model.module.vq(z_for_pred)
+            else:
+                z_for_pred = model.encoder(x_for_pred)
+                quantized_pred, indices, commit_loss, codebook_loss = model.vq(z_for_pred)
+
+            # Build a random mask for recursive conditioning
+            batch_size = frame_t.shape[0]
+            rand_mask = (torch.rand(batch_size, device=device) < curr_p).view(batch_size, 1, 1, 1)
+            # Detach both options:
+            #  - regenerated_f_t_candidate_perm.detach()
+            #  - f_t_main_perm.detach()
+            conditioning_perm = torch.where(
+                rand_mask,
+                regenerated_f_t_candidate_perm.detach(),
+                f_t_main_perm.detach()
+            )
+            # Decode frame_{t+1}
+            if isinstance(model, torch.nn.DataParallel):
+                recon_tp1_perm = model.module.decoder(quantized_pred, conditioning_perm)
+            else:
+                recon_tp1_perm = model.decoder(quantized_pred, conditioning_perm)
+
+            # Bring back to (B, C, H, W)
+            recon_tp1 = recon_tp1_perm.permute(0, 1, 3, 2)
+
+            # --- Reconstruction Loss (motion‐weighted) ---
             frame_diff = torch.abs(frame_tp1 - frame_t)
             motion_weight = 1.0 + 10.0 * (frame_diff.sum(dim=1, keepdim=True) > 0.05).float()
-            rec_loss = (motion_weight * (recon - frame_tp1)**2).mean()
+            rec_loss = (motion_weight * (recon_tp1 - frame_tp1) ** 2).mean()
 
-            # Entropy regularization
-            entropy, hist = codebook_entropy(indices, 256)
+            # --- Entropy Regularization on codebook indices ---
+            entropy, hist = codebook_entropy(indices, model.vq.num_embeddings)
             entropy_reg = -args.entropy_weight * entropy
-            loss = rec_loss + commit_loss + codebook_loss + entropy_reg
+
+            # --- Total Loss ---
+            vq_loss = commit_loss + codebook_loss
+            loss = rec_loss + vq_loss + entropy_reg
+
+
         if scaler is not None:
             scaler.scale(loss / grad_accum).backward()
         else:
@@ -409,10 +487,10 @@ def train(args):
         # Logging
         if (global_step + 1) % args.log_interval == 0:
             with torch.no_grad():
-                psnr_val = psnr(recon, frame_tp1)
-                ssim_val = ssim(recon, frame_tp1)
-                l1 = F.l1_loss(recon, frame_tp1).item()
-                l2 = F.mse_loss(recon, frame_tp1).item()
+                psnr_val = psnr(recon_tp1, frame_tp1)
+                ssim_val = ssim(recon_tp1, frame_tp1)
+                l1 = F.l1_loss(recon_tp1, frame_tp1).item()
+                l2 = F.mse_loss(recon_tp1, frame_tp1).item()
                 wandb.log({
                     'loss/total': loss.item(),
                     'loss/rec': rec_loss.item(),
@@ -431,7 +509,7 @@ def train(args):
         # Save reconstructions
         if (global_step + 1) % args.recon_interval == 0:
             with torch.no_grad():
-                grid = make_grid(torch.cat([frame_t, frame_tp1, recon], dim=0), nrow=args.batch_size)
+                grid = make_grid(torch.cat([frame_t, frame_tp1, recon_tp1], dim=0), nrow=args.batch_size)
                 wandb.log({'reconstructions': [wandb.Image(grid, caption=f'Step {global_step+1}')]}, step=global_step+1)
         # Codebook reset
         if (global_step + 1) % args.codebook_reset_interval == 0:
@@ -490,7 +568,9 @@ def evaluate(model, loader, device, scaler, pbar_desc=None):
             loader_iter = tqdm(loader, desc=pbar_desc, dynamic_ncols=True)
         else:
             loader_iter = loader
-        for frame_t, frame_tp1 in loader_iter:
+            """NEW METHOD"""
+        for frame_tm1, frame_t, frame_tp1 in loader_iter:
+        # for  frame_t, frame_tp1 in loader_iter:
             frame_t, frame_tp1 = frame_t.to(device), frame_tp1.to(device)
             with torch.amp.autocast(device.type, enabled=(scaler is not None)):
                 recon, indices, commit_loss, codebook_loss = model(frame_t, frame_tp1)
@@ -523,6 +603,10 @@ if __name__ == "__main__":
     parser.add_argument('--analyze', action='store_true', help='Analyze latest checkpoint')
     parser.add_argument('--analysis_output_dir', type=str, default='analysis', help='Output directory for analysis')
     parser.add_argument('--diagnostic_interval', type=int, default=50000, help='Steps between diagnostic visualizations')
+
+    """NEW HYPERPARAMS for using regenerated frame to generate new frames"""
+    parser.add_argument('--recursive_conditioning_prob_max', type=float, default=0.6)
+    parser.add_argument('--recursive_conditioning_anneal_iters', type=int, default=5000) # e.g., half of max_iters
     args = parser.parse_args()
 
     # In the main part, before train() call:

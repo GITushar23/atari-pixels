@@ -695,7 +695,7 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='Enable debug logging for troubleshooting video recording issues')
     # Bulk generation arguments
     parser.add_argument('--bulk', action='store_true', help='Enable bulk video generation without overlays')
-    parser.add_argument('--total_videos', type=int, default=10, help='Total number of videos to generate in bulk mode')
+    parser.add_argument('--total_videos', type=int, default=1000, help='Total number of videos to generate in bulk mode')
     parser.add_argument('--percent_random', type=float, default=50, help='Percentage of random agent videos in bulk mode (0-100)')
     args = parser.parse_args()
     if args.bulk:

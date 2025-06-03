@@ -3,10 +3,12 @@ atari/
 __pycache__/
 data/
 checkpoints/
+checkpoints_atari/
 videos/
 eval_logs/
 wandb/
 bulk_videos/
+bulk_videos_atari/
 *reconstructions*
 comparison_frames/
 debug_frames/
